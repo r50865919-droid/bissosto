@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="bn"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BISSOSTO.COM — Online Shopping</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="topbar"><div class="container nav"><a class="brand" href="/">BISSOSTO<span>.COM</span></a><nav><a href="#products" data-i18n="products">Products</a><button class="navlink" id="accountBtn">My Account</button><a class="navlink" href="/admin.html">Admin</a></nav><div class="actions"><button id="langBtn">বাংলা</button><button id="themeBtn">☾</button><button id="cartBtn" class="cart">🛒 <b id="cartCount">0</b></button></div></div></header>
+<main>
+<section class="hero"><div class="container hero-grid"><div><span class="eyebrow">BISSOSTO.COM</span><h1 data-i18n="heroTitle">Shopping made simple.</h1><p data-i18n="heroText">Quality products, clear pricing and reliable delivery—built for real orders.</p><a class="primary" href="#products" data-i18n="shopNow">Shop now</a></div><div class="hero-card"><div class="hero-badge">NEW</div><strong>Smart shopping</strong><span>Fast checkout • Secure account • Order tracking</span></div></div></section>
+<section class="container section" id="products"><div class="section-head"><div><span class="eyebrow">STORE</span><h2 data-i18n="featured">Featured products</h2></div><input id="search" class="search" placeholder="Search products..."></div><div id="categories" class="chips"></div><div id="productsGrid" class="grid"></div></section>
+<section class="container trust"><div><b>🔒 Secure account</b><span>Your account and orders stay on the server.</span></div><div><b>📍 Address management</b><span>Save your delivery address for faster checkout.</span></div><div><b>📦 Order tracking</b><span>See your order status from your account.</span></div></section>
+</main>
+<div id="drawer" class="drawer"><div class="drawer-panel"><div class="drawer-head"><h3 id="drawerTitle">My Account</h3><button class="close" onclick="closeDrawer()">×</button></div><div id="drawerBody"></div></div></div>
+<div id="toast" class="toast"></div><script src="/app.js"></script></body></html>
