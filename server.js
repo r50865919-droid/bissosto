@@ -1,30 +1,659 @@
 import 'dotenv/config';
-import express from 'express'; import helmet from 'helmet'; import rateLimit from 'express-rate-limit'; import bcrypt from 'bcryptjs'; import jwt from 'jsonwebtoken'; import cookieParser from 'cookie-parser'; import pg from 'pg'; import path from 'path'; import {fileURLToPath} from 'url';
-const {Pool}=pg; const __dirname=path.dirname(fileURLToPath(import.meta.url));
-const app=express(); app.use(helmet({contentSecurityPolicy:false})); app.use(express.json({limit:'1mb'})); app.use(cookieParser());
-app.use(rateLimit({windowMs:15*60*1000,max:300,standardHeaders:true,legacyHeaders:false}));
-const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false});
-const q=(text,params=[])=>pool.query(text,params);
-const sign=u=>jwt.sign({id:u.id,role:u.role,email:u.email},process.env.JWT_SECRET,{expiresIn:'7d'});
-function auth(req,res,next){try{const t=req.cookies.bissosto_token;if(!t)return res.status(401).json({error:'Login required'});req.user=jwt.verify(t,process.env.JWT_SECRET);next()}catch{return res.status(401).json({error:'Invalid or expired session'})}}
-function admin(req,res,next){if(req.user?.role!=='admin')return res.status(403).json({error:'Admin access required'});next()}
-async function bootstrap(){if(!process.env.DATABASE_URL||!process.env.JWT_SECRET) throw Error('DATABASE_URL and JWT_SECRET are required'); const fs=await import('fs/promises'); await q(await fs.readFile(path.join(__dirname,'db/schema.sql'),'utf8')); if(process.env.ADMIN_EMAIL&&process.env.ADMIN_PASSWORD){const hash=await bcrypt.hash(process.env.ADMIN_PASSWORD,12);await q(`INSERT INTO users(name,email,password_hash,role) VALUES($1,$2,$3,'admin') ON CONFLICT(email) DO UPDATE SET role='admin'`, ['Bissosto Admin',process.env.ADMIN_EMAIL,hash]);}}
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'Bissosto API'}));
-app.post('/api/auth/register',async(req,res)=>{try{const {name,email,password,phone}=req.body;if(!name||!email||!password)return res.status(400).json({error:'Name, email and password are required'});if(password.length<8)return res.status(400).json({error:'Password must be at least 8 characters'});const h=await bcrypt.hash(password,12);const r=await q(`INSERT INTO users(name,email,password_hash,phone) VALUES($1,LOWER($2),$3,$4) RETURNING id,name,email,phone,role,language`,[name,email,h,phone||null]);res.cookie('bissosto_token',sign(r.rows[0]),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:7*86400000});res.json({user:r.rows[0]})}catch(e){res.status(e.code==='23505'?409:500).json({error:e.code==='23505'?'Email already exists':'Registration failed'})}});
-app.post('/api/auth/login',async(req,res)=>{try{const {email,password}=req.body;const r=await q('SELECT * FROM users WHERE email=LOWER($1)',[email||'']);if(!r.rowCount||!(await bcrypt.compare(password||'',r.rows[0].password_hash)))return res.status(401).json({error:'Invalid email or password'});const u=r.rows[0];res.cookie('bissosto_token',sign(u),{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:7*86400000});res.json({user:{id:u.id,name:u.name,email:u.email,phone:u.phone,role:u.role,language:u.language}})}catch{res.status(500).json({error:'Login failed'})}});
-app.post('/api/auth/logout',(req,res)=>{res.clearCookie('bissosto_token');res.json({ok:true})});
-app.get('/api/me',auth,async(req,res)=>{const r=await q('SELECT id,name,email,phone,role,language FROM users WHERE id=$1',[req.user.id]);res.json({user:r.rows[0]})});
-app.put('/api/me',auth,async(req,res)=>{const {name,phone,language}=req.body;const r=await q('UPDATE users SET name=COALESCE($1,name),phone=COALESCE($2,phone),language=COALESCE($3,language) WHERE id=$4 RETURNING id,name,email,phone,role,language',[name||null,phone||null,language||null,req.user.id]);res.json({user:r.rows[0]})});
-app.get('/api/products',async(req,res)=>{const r=await q('SELECT * FROM products WHERE active=true ORDER BY id DESC');res.json({products:r.rows})});
-app.get('/api/admin/products',auth,admin,async(req,res)=>{const r=await q('SELECT * FROM products ORDER BY id DESC');res.json({products:r.rows})});
-app.post('/api/admin/products',auth,admin,async(req,res)=>{const {name,name_bn,description,price,stock,image_url,category}=req.body;const r=await q('INSERT INTO products(name,name_bn,description,price,stock,image_url,category) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[name,name_bn||null,description||null,price,stock||0,image_url||null,category||null]);res.json({product:r.rows[0]})});
-app.put('/api/admin/products/:id',auth,admin,async(req,res)=>{const {name,name_bn,description,price,stock,image_url,category,active}=req.body;const r=await q('UPDATE products SET name=COALESCE($1,name),name_bn=COALESCE($2,name_bn),description=COALESCE($3,description),price=COALESCE($4,price),stock=COALESCE($5,stock),image_url=COALESCE($6,image_url),category=COALESCE($7,category),active=COALESCE($8,active),updated_at=NOW() WHERE id=$9 RETURNING *',[name,name_bn,description,price,stock,image_url,category,active,req.params.id]);res.json({product:r.rows[0]})});
-app.get('/api/addresses',auth,async(req,res)=>{const r=await q('SELECT * FROM addresses WHERE user_id=$1 ORDER BY is_default DESC,id DESC',[req.user.id]);res.json({addresses:r.rows})});
-app.post('/api/addresses',auth,async(req,res)=>{const {label,full_name,phone,district,area,address_line,note,is_default}=req.body;const c=await pool.connect();try{await c.query('BEGIN');if(is_default)await c.query('UPDATE addresses SET is_default=false WHERE user_id=$1',[req.user.id]);const r=await c.query('INSERT INTO addresses(user_id,label,full_name,phone,district,area,address_line,note,is_default) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[req.user.id,label||'Home',full_name,phone,district,area,address_line,note||null,!!is_default]);await c.query('COMMIT');res.json({address:r.rows[0]})}catch(e){await c.query('ROLLBACK');res.status(400).json({error:'Could not save address'})}finally{c.release()}});
-app.post('/api/orders',auth,async(req,res)=>{const {items,payment_method,address}=req.body;if(!Array.isArray(items)||!items.length||!address||!payment_method)return res.status(400).json({error:'Items, address and payment method are required'});if(!['cod','bkash','nagad','card'].includes(payment_method))return res.status(400).json({error:'Unsupported payment method'});const ids=items.map(x=>Number(x.product_id));const c=await pool.connect();try{await c.query('BEGIN');const pr=await c.query('SELECT * FROM products WHERE id=ANY($1::bigint[]) AND active=true FOR UPDATE',[ids]);const map=new Map(pr.rows.map(x=>[String(x.id),x]));let total=0,lines=[];for(const i of items){const p=map.get(String(i.product_id));const qty=Number(i.quantity);if(!p||!Number.isInteger(qty)||qty<1||qty>p.stock)throw Error('Product unavailable or insufficient stock');total+=Number(p.price)*qty;lines.push([p,qty])}const o=await c.query(`INSERT INTO orders(user_id,payment_method,total,full_name,phone,district,area,address_line,note) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[req.user.id,payment_method,total,address.full_name,address.phone,address.district,address.area,address.address_line,address.note||null]);for(const [p,qty] of lines){await c.query('INSERT INTO order_items(order_id,product_id,product_name,quantity,unit_price) VALUES($1,$2,$3,$4,$5)',[o.rows[0].id,p.id,p.name,qty,p.price]);await c.query('UPDATE products SET stock=stock-$1,updated_at=NOW() WHERE id=$2',[qty,p.id])}await c.query('COMMIT');res.status(201).json({order:o.rows[0],payment:{required:payment_method!=='cod',status:'pending_gateway'}})}catch(e){await c.query('ROLLBACK');res.status(400).json({error:e.message==='Product unavailable or insufficient stock'?e.message:'Could not create order'})}finally{c.release()}});
-app.get('/api/orders',auth,async(req,res)=>{const r=await q('SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC',[req.user.id]);res.json({orders:r.rows})});
-app.get('/api/admin/orders',auth,admin,async(req,res)=>{const r=await q(`SELECT o.*,u.email, u.name AS account_name FROM orders o JOIN users u ON u.id=o.user_id ORDER BY o.created_at DESC`);res.json({orders:r.rows})});
-app.put('/api/admin/orders/:id',auth,admin,async(req,res)=>{const {status,payment_status}=req.body;const r=await q('UPDATE orders SET status=COALESCE($1,status),payment_status=COALESCE($2,payment_status),updated_at=NOW() WHERE id=$3 RETURNING *',[status,payment_status,req.params.id]);res.json({order:r.rows[0]})});
-app.get('/api/admin/customers',auth,admin,async(req,res)=>{const r=await q(`SELECT u.id,u.name,u.email,u.phone,u.language,u.created_at, a.full_name,a.district,a.area,a.address_line,a.note FROM users u LEFT JOIN LATERAL (SELECT * FROM addresses WHERE user_id=u.id ORDER BY is_default DESC,id DESC LIMIT 1) a ON true WHERE u.role='customer' ORDER BY u.created_at DESC`);res.json({customers:r.rows})});
-app.use(express.static(path.join(__dirname,'public'))); app.get('/{*splat}',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-bootstrap().then(()=>app.listen(process.env.PORT||3000,()=>console.log('Bissosto running'))).catch(e=>{console.error(e);process.exit(1)});
+import express from 'express';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import cookieParser from 'cookie-parser';
+import pg from 'pg';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const { Pool } = pg;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+const app = express();
+
+app.use(helmet({ contentSecurityPolicy: false }));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
+
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false
+}));
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production'
+    ? { rejectUnauthorized: false }
+    : false
+});
+
+const q = (text, params = []) => pool.query(text, params);
+
+const sign = u => jwt.sign(
+  {
+    id: u.id,
+    role: u.role,
+    email: u.email
+  },
+  process.env.JWT_SECRET,
+  {
+    expiresIn: '7d'
+  }
+);
+
+function auth(req, res, next) {
+  try {
+    const t = req.cookies.bissosto_token;
+
+    if (!t) {
+      return res.status(401).json({
+        error: 'Login required'
+      });
+    }
+
+    req.user = jwt.verify(t, process.env.JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({
+      error: 'Invalid or expired session'
+    });
+  }
+}
+
+function admin(req, res, next) {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({
+      error: 'Admin access required'
+    });
+  }
+
+  next();
+}
+
+async function bootstrap() {
+  if (!process.env.DATABASE_URL || !process.env.JWT_SECRET) {
+    throw new Error('DATABASE_URL and JWT_SECRET are required');
+  }
+
+  const fs = await import('fs/promises');
+
+  await q(
+    await fs.readFile(
+      path.join(__dirname, 'db/schema.sql'),
+      'utf8'
+    )
+  );
+
+  if (process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
+    const hash = await bcrypt.hash(
+      process.env.ADMIN_PASSWORD,
+      12
+    );
+
+    await q(
+      `INSERT INTO users(name,email,password_hash,role)
+       VALUES($1,$2,$3,'admin')
+       ON CONFLICT(email)
+       DO UPDATE SET role='admin'`,
+      [
+        'Bissosto Admin',
+        process.env.ADMIN_EMAIL,
+        hash
+      ]
+    );
+  }
+}
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    service: 'Bissosto API'
+  });
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password, phone } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        error: 'Name, email and password are required'
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters'
+      });
+    }
+
+    const h = await bcrypt.hash(password, 12);
+
+    const r = await q(
+      `INSERT INTO users(name,email,password_hash,phone)
+       VALUES($1,LOWER($2),$3,$4)
+       RETURNING id,name,email,phone,role,language`,
+      [
+        name,
+        email,
+        h,
+        phone || null
+      ]
+    );
+
+    res.cookie(
+      'bissosto_token',
+      sign(r.rows[0]),
+      {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 7 * 86400000
+      }
+    );
+
+    res.json({
+      user: r.rows[0]
+    });
+  } catch (e) {
+    res.status(e.code === '23505' ? 409 : 500).json({
+      error: e.code === '23505'
+        ? 'Email already exists'
+        : 'Registration failed'
+    });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    const r = await q(
+      'SELECT * FROM users WHERE email=LOWER($1)',
+      [email || '']
+    );
+
+    if (
+      !r.rowCount ||
+      !(await bcrypt.compare(
+        password || '',
+        r.rows[0].password_hash
+      ))
+    ) {
+      return res.status(401).json({
+        error: 'Invalid email or password'
+      });
+    }
+
+    const u = r.rows[0];
+
+    res.cookie(
+      'bissosto_token',
+      sign(u),
+      {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 7 * 86400000
+      }
+    );
+
+    res.json({
+      user: {
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        phone: u.phone,
+        role: u.role,
+        language: u.language
+      }
+    });
+  } catch {
+    res.status(500).json({
+      error: 'Login failed'
+    });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('bissosto_token');
+  res.json({ ok: true });
+});
+
+app.get('/api/me', auth, async (req, res) => {
+  const r = await q(
+    'SELECT id,name,email,phone,role,language FROM users WHERE id=$1',
+    [req.user.id]
+  );
+
+  res.json({
+    user: r.rows[0]
+  });
+});
+
+app.put('/api/me', auth, async (req, res) => {
+  const { name, phone, language } = req.body;
+
+  const r = await q(
+    `UPDATE users
+     SET name=COALESCE($1,name),
+         phone=COALESCE($2,phone),
+         language=COALESCE($3,language)
+     WHERE id=$4
+     RETURNING id,name,email,phone,role,language`,
+    [
+      name || null,
+      phone || null,
+      language || null,
+      req.user.id
+    ]
+  );
+
+  res.json({
+    user: r.rows[0]
+  });
+});
+
+app.get('/api/products', async (req, res) => {
+  const r = await q(
+    'SELECT * FROM products WHERE active=true ORDER BY id DESC'
+  );
+
+  res.json({
+    products: r.rows
+  });
+});
+
+app.get('/api/admin/products', auth, admin, async (req, res) => {
+  const r = await q(
+    'SELECT * FROM products ORDER BY id DESC'
+  );
+
+  res.json({
+    products: r.rows
+  });
+});
+
+app.post('/api/admin/products', auth, admin, async (req, res) => {
+  const {
+    name,
+    name_bn,
+    description,
+    price,
+    stock,
+    image_url,
+    category
+  } = req.body;
+
+  const r = await q(
+    `INSERT INTO products
+     (name,name_bn,description,price,stock,image_url,category)
+     VALUES($1,$2,$3,$4,$5,$6,$7)
+     RETURNING *`,
+    [
+      name,
+      name_bn || null,
+      description || null,
+      price,
+      stock || 0,
+      image_url || null,
+      category || null
+    ]
+  );
+
+  res.json({
+    product: r.rows[0]
+  });
+});
+
+app.put('/api/admin/products/:id', auth, admin, async (req, res) => {
+  const {
+    name,
+    name_bn,
+    description,
+    price,
+    stock,
+    image_url,
+    category,
+    active
+  } = req.body;
+
+  const r = await q(
+    `UPDATE products
+     SET name=COALESCE($1,name),
+         name_bn=COALESCE($2,name_bn),
+         description=COALESCE($3,description),
+         price=COALESCE($4,price),
+         stock=COALESCE($5,stock),
+         image_url=COALESCE($6,image_url),
+         category=COALESCE($7,category),
+         active=COALESCE($8,active),
+         updated_at=NOW()
+     WHERE id=$9
+     RETURNING *`,
+    [
+      name,
+      name_bn,
+      description,
+      price,
+      stock,
+      image_url,
+      category,
+      active,
+      req.params.id
+    ]
+  );
+
+  res.json({
+    product: r.rows[0]
+  });
+});
+
+app.get('/api/addresses', auth, async (req, res) => {
+  const r = await q(
+    'SELECT * FROM addresses WHERE user_id=$1 ORDER BY is_default DESC,id DESC',
+    [req.user.id]
+  );
+
+  res.json({
+    addresses: r.rows
+  });
+});
+
+app.post('/api/addresses', auth, async (req, res) => {
+  const {
+    label,
+    full_name,
+    phone,
+    district,
+    area,
+    address_line,
+    note,
+    is_default
+  } = req.body;
+
+  const c = await pool.connect();
+
+  try {
+    await c.query('BEGIN');
+
+    if (is_default) {
+      await c.query(
+        'UPDATE addresses SET is_default=false WHERE user_id=$1',
+        [req.user.id]
+      );
+    }
+
+    const r = await c.query(
+      `INSERT INTO addresses
+       (user_id,label,full_name,phone,district,area,address_line,note,is_default)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *`,
+      [
+        req.user.id,
+        label || 'Home',
+        full_name,
+        phone,
+        district,
+        area,
+        address_line,
+        note || null,
+        !!is_default
+      ]
+    );
+
+    await c.query('COMMIT');
+
+    res.json({
+      address: r.rows[0]
+    });
+  } catch {
+    await c.query('ROLLBACK');
+
+    res.status(400).json({
+      error: 'Could not save address'
+    });
+  } finally {
+    c.release();
+  }
+});
+
+app.post('/api/orders', auth, async (req, res) => {
+  const {
+    items,
+    payment_method,
+    address
+  } = req.body;
+
+  if (
+    !Array.isArray(items) ||
+    !items.length ||
+    !address ||
+    !payment_method
+  ) {
+    return res.status(400).json({
+      error: 'Items, address and payment method are required'
+    });
+  }
+
+  if (!['cod', 'bkash', 'nagad', 'card'].includes(payment_method)) {
+    return res.status(400).json({
+      error: 'Unsupported payment method'
+    });
+  }
+
+  const ids = items.map(x => Number(x.product_id));
+  const c = await pool.connect();
+
+  try {
+    await c.query('BEGIN');
+
+    const pr = await c.query(
+      'SELECT * FROM products WHERE id=ANY($1::bigint[]) AND active=true FOR UPDATE',
+      [ids]
+    );
+
+    const map = new Map(
+      pr.rows.map(x => [String(x.id), x])
+    );
+
+    let total = 0;
+    const lines = [];
+
+    for (const i of items) {
+      const p = map.get(String(i.product_id));
+      const qty = Number(i.quantity);
+
+      if (
+        !p ||
+        !Number.isInteger(qty) ||
+        qty < 1 ||
+        qty > p.stock
+      ) {
+        throw new Error(
+          'Product unavailable or insufficient stock'
+        );
+      }
+
+      total += Number(p.price) * qty;
+      lines.push([p, qty]);
+    }
+
+    const o = await c.query(
+      `INSERT INTO orders
+       (user_id,payment_method,total,full_name,phone,district,area,address_line,note)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING *`,
+      [
+        req.user.id,
+        payment_method,
+        total,
+        address.full_name,
+        address.phone,
+        address.district,
+        address.area,
+        address.address_line,
+        address.note || null
+      ]
+    );
+
+    for (const [p, qty] of lines) {
+      await c.query(
+        `INSERT INTO order_items
+         (order_id,product_id,product_name,quantity,unit_price)
+         VALUES($1,$2,$3,$4,$5)`,
+        [
+          o.rows[0].id,
+          p.id,
+          p.name,
+          qty,
+          p.price
+        ]
+      );
+
+      await c.query(
+        `UPDATE products
+         SET stock=stock-$1,updated_at=NOW()
+         WHERE id=$2`,
+        [qty, p.id]
+      );
+    }
+
+    await c.query('COMMIT');
+
+    res.status(201).json({
+      order: o.rows[0],
+      payment: {
+        required: payment_method !== 'cod',
+        status: 'pending_gateway'
+      }
+    });
+  } catch (e) {
+    await c.query('ROLLBACK');
+
+    res.status(400).json({
+      error:
+        e.message === 'Product unavailable or insufficient stock'
+          ? e.message
+          : 'Could not create order'
+    });
+  } finally {
+    c.release();
+  }
+});
+
+app.get('/api/orders', auth, async (req, res) => {
+  const r = await q(
+    'SELECT * FROM orders WHERE user_id=$1 ORDER BY created_at DESC',
+    [req.user.id]
+  );
+
+  res.json({
+    orders: r.rows
+  });
+});
+
+app.get('/api/admin/orders', auth, admin, async (req, res) => {
+  const r = await q(
+    `SELECT o.*,u.email,u.name AS account_name
+     FROM orders o
+     JOIN users u ON u.id=o.user_id
+     ORDER BY o.created_at DESC`
+  );
+
+  res.json({
+    orders: r.rows
+  });
+});
+
+app.put('/api/admin/orders/:id', auth, admin, async (req, res) => {
+  const {
+    status,
+    payment_status
+  } = req.body;
+
+  const r = await q(
+    `UPDATE orders
+     SET status=COALESCE($1,status),
+         payment_status=COALESCE($2,payment_status),
+         updated_at=NOW()
+     WHERE id=$3
+     RETURNING *`,
+    [
+      status,
+      payment_status,
+      req.params.id
+    ]
+  );
+
+  res.json({
+    order: r.rows[0]
+  });
+});
+
+app.get('/api/admin/customers', auth, admin, async (req, res) => {
+  const r = await q(
+    `SELECT
+       u.id,
+       u.name,
+       u.email,
+       u.phone,
+       u.language,
+       u.created_at,
+       a.full_name,
+       a.district,
+       a.area,
+       a.address_line,
+       a.note
+     FROM users u
+     LEFT JOIN LATERAL (
+       SELECT *
+       FROM addresses
+       WHERE user_id=u.id
+       ORDER BY is_default DESC,id DESC
+       LIMIT 1
+     ) a ON true
+     WHERE u.role='customer'
+     ORDER BY u.created_at DESC`
+  );
+
+  res.json({
+    customers: r.rows
+  });
+});
+
+app.use(
+  express.static(
+    path.join(__dirname, 'public')
+  )
+);
+
+app.get('/{*splat}', (req, res) => {
+  res.sendFile(
+    path.join(__dirname, 'public', 'index.html')
+  );
+});
+
+/*
+  Vercel serverless handler.
+  Do not use app.listen() here.
+*/
+const bootPromise = bootstrap();
+
+export default async function handler(req, res) {
+  try {
+    await bootPromise;
+    return app(req, res);
+  } catch (error) {
+    console.error('Bissosto startup error:', error);
+
+    return res.status(500).json({
+      error: 'Server initialization failed'
+    });
+  }
+}
